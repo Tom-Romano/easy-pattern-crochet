@@ -1,8 +1,17 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ArrowLeftToLine } from 'lucide-react';
 import { parsePattern, type ParseResult } from '@/lib/parsePattern';
 import { stringToColor } from '@/lib/color';
+
+type RowDirection = 'ltr' | 'rtl';
+type WorkingRow = {
+  id: string;
+  cells: string[];
+  direction: RowDirection | null;
+  originalRowNumber: number;
+};
 
 const EXAMPLE_TEXT = `Patron crochet (30 colonnes x 107 lignes)
 Lecture en aller-retour, départ en bas à droite.
@@ -135,6 +144,7 @@ const CONSENSUS_THRESHOLD = 0.9;
 export default function HomePage() {
   const [rawText, setRawText] = useState('');
   const [result, setResult] = useState<ParseResult | null>(null);
+  const [rowsState, setRowsState] = useState<WorkingRow[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [fileName, setFileName] = useState<string>('');
@@ -154,6 +164,13 @@ export default function HomePage() {
   const handleParse = (text: string, label?: string) => {
     const parsed = parsePattern(text, { consensusThreshold: CONSENSUS_THRESHOLD });
     setResult(parsed);
+    const workingRows: WorkingRow[] = parsed.rows.map((row, idx) => ({
+      id: `row-${idx + 1}`,
+      cells: row,
+      direction: parsed.rowDirections[idx] ?? null,
+      originalRowNumber: idx + 1
+    }));
+    setRowsState(workingRows);
     setErrors(parsed.errors);
     setWarnings(parsed.warnings);
     setRawText(text);
@@ -185,6 +202,7 @@ export default function HomePage() {
   const handleClear = () => {
     setRawText('');
     setResult(null);
+    setRowsState([]);
     setErrors([]);
     setWarnings([]);
     setFileName('');
@@ -206,84 +224,103 @@ export default function HomePage() {
     return map;
   }, [result, customColors]);
 
+  const colCount = result?.colCount ?? null;
+  const rowCount = rowsState.length;
+
   const canRender = Boolean(
     result &&
-      result.colCount &&
-      result.rows.length > 0 &&
+      colCount &&
+      rowCount > 0 &&
       errors.length === 0 &&
-      result.rows.every((r) => r.length === result.colCount)
+      rowsState.every((r) => r.cells.length === colCount)
   );
 
-  const displayRows = useMemo(() => {
-    if (!result) return [] as { row: string[]; originalIndex: number }[];
-    return result.rows.map((row, idx) => ({ row, originalIndex: idx }));
-  }, [result]);
+  const displayRows = useMemo(
+    () =>
+      rowsState.map((row, idx) => ({
+        row: row.cells,
+        direction: row.direction,
+        id: row.id,
+        index: idx,
+        originalRowNumber: row.originalRowNumber
+      })),
+    [rowsState]
+  );
 
   useEffect(() => {
-    if (!result?.rowCount) {
+    if (rowsState.length === 0) {
       setActiveRowIndex(0);
-      return;
+    } else if (activeRowIndex >= rowsState.length) {
+      setActiveRowIndex(rowsState.length - 1);
     }
-    setActiveRowIndex(0);
-  }, [result]);
+  }, [rowsState.length, activeRowIndex]);
 
   const jumpToRow = (rowIndex: number) => {
-    if (!result?.rowCount) return;
-    const clamped = Math.max(0, Math.min(rowIndex, result.rowCount - 1));
+    if (!rowCount) return;
+    const clamped = Math.max(0, Math.min(rowIndex, rowCount - 1));
     setActiveRowIndex(clamped);
   };
 
-  const currentDirectionIsRtl = useMemo(() => {
-    if (!result) return false;
-    const explicit = result.rowDirections?.[activeRowIndex];
-    if (explicit === 'rtl') return true;
-    if (explicit === 'ltr') return false;
-    return serpentine ? activeRowIndex % 2 === 0 : false;
-  }, [result, activeRowIndex, serpentine]);
+  const directionForRow = useCallback(
+    (rowIndex: number): RowDirection => {
+      const explicit = rowsState[rowIndex]?.direction;
+      if (explicit) return explicit;
+      if (serpentine) {
+        const original = rowsState[rowIndex]?.originalRowNumber ?? rowIndex + 1;
+        const serpentineIndex = original - 1; // start bottom row as 0
+        return serpentineIndex % 2 === 0 ? 'rtl' : 'ltr';
+      }
+      return 'ltr';
+    },
+    [rowsState, serpentine]
+  );
+
+  const sideLabelForRow = (rowIndex: number) => (directionForRow(rowIndex) === 'rtl' ? 'R' : 'W');
+
+  const currentDirectionIsRtl = rowCount ? directionForRow(activeRowIndex) === 'rtl' : false;
 
   const gridCells = useMemo(() => {
-    if (!result?.colCount) return [] as { key: string; color: string; rowPos: number; colPos: number; originalRow: number }[];
+    if (!colCount || rowCount === 0) {
+      return [] as { key: string; color: string; rowPos: number; colPos: number; originalRow: number }[];
+    }
 
-    const colCount = result.colCount;
-    const rowCount = result.rowCount;
     const cells: { key: string; color: string; rowPos: number; colPos: number; originalRow: number }[] = [];
 
-    displayRows.forEach((entry) => {
-      const { row, originalIndex } = entry;
-      const rtl = serpentine ? originalIndex % 2 === 0 : false; // start from bottom-right, snake upwards
-      const rowPos = rowCount - originalIndex; // CSS grid rows start at 1 from top
+    displayRows.forEach((entry, idx) => {
+      const rtl = directionForRow(idx) === 'rtl';
+      const rowPos = rowCount - idx; // CSS grid rows start at 1 from top
 
-      row.forEach((color, colIdx) => {
+      entry.row.forEach((color, colIdx) => {
         const colPos = rtl ? colCount - colIdx : colIdx + 1;
         cells.push({
-          key: `${originalIndex}-${colIdx}`,
+          key: `${entry.id}-${colIdx}`,
           color,
           rowPos,
           colPos,
-          originalRow: originalIndex
+          originalRow: idx
         });
       });
     });
     return cells;
-  }, [result, serpentine, displayRows]);
+  }, [colCount, rowCount, displayRows, directionForRow]);
 
   const handleExportPng = () => {
-    if (!result?.colCount || !canRender) return;
+    if (!colCount || !canRender || rowCount === 0) return;
     const canvas = document.createElement('canvas');
-    canvas.width = result.colCount * cellSize;
-    canvas.height = result.rowCount * cellSize;
+    canvas.width = colCount * cellSize;
+    canvas.height = rowCount * cellSize;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const colCount = result.colCount;
-    const rowCount = result.rowCount;
+    const colsTotal = colCount;
+    const rowsTotal = rowCount;
 
-    displayRows.forEach((entry) => {
-      const rtl = serpentine ? entry.originalIndex % 2 === 0 : false;
-      const y = (rowCount - 1 - entry.originalIndex) * cellSize; // bottom row stays at canvas bottom
+    displayRows.forEach((entry, idx) => {
+      const rtl = directionForRow(idx) === 'rtl';
+      const y = (rowsTotal - 1 - idx) * cellSize; // bottom row stays at canvas bottom
 
       entry.row.forEach((colorName, colIdx) => {
-        const x = (rtl ? colCount - 1 - colIdx : colIdx) * cellSize;
+        const x = (rtl ? colsTotal - 1 - colIdx : colIdx) * cellSize;
         const fill = displayColors[colorName] ?? stringToColor(colorName);
         ctx.fillStyle = fill;
         ctx.fillRect(x, y, cellSize, cellSize);
@@ -300,26 +337,86 @@ export default function HomePage() {
     link.click();
   };
 
+  const serializeRow = useCallback(
+    (cells: string[], rowIndex: number) => {
+      const direction = directionForRow(rowIndex);
+      const arrowText = direction === 'rtl' ? 'droite→gauche' : 'gauche→droite';
+      const side = direction === 'rtl' ? 'R' : 'W';
+      const segments: { color: string; count: number }[] = [];
+      cells.forEach((color) => {
+        const last = segments[segments.length - 1];
+        if (last && last.color === color) {
+          last.count += 1;
+        } else {
+          segments.push({ color, count: 1 });
+        }
+      });
+      const segmentText = segments.map((seg) => `${seg.count} ${seg.color}`).join(' ');
+      return `Ligne ${rowIndex + 1} (${side} ${arrowText}) : ${segmentText}`;
+    },
+    [directionForRow]
+  );
+
+  const handleExportTxt = () => {
+    if (!rowCount || !canRender) return;
+    const legendLines = Object.entries(displayColors)
+      .map(([name, color]) => `- ${name} : ${color.toUpperCase()}`)
+      .join('\n');
+    const rowLines = displayRows.map((entry, idx) => serializeRow(entry.row, idx)).join('\n');
+    const header = [
+      'Patron crochet exporté',
+      `Colonnes : ${colCount ?? '—'}`,
+      `Lignes : ${rowCount}`,
+      'Palette (nom -> hex) :',
+      legendLines,
+      ''
+    ].join('\n');
+    const content = `${header}${rowLines}`;
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${fileName?.replace(/\\.txt$/i, '') || 'pattern'}-modifie.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const gridStyle: React.CSSProperties = useMemo(() => {
     const base = { '--cell-size': `${cellSize}px` } as React.CSSProperties;
-    if (!result?.colCount) return base;
+    if (!colCount || !rowCount) return base;
     return {
       ...base,
-      gridTemplateColumns: `repeat(${result.colCount}, var(--cell-size))`,
-      gridTemplateRows: `repeat(${result.rowCount}, var(--cell-size))`
+      gridTemplateColumns: `repeat(${colCount}, var(--cell-size))`,
+      gridTemplateRows: `repeat(${rowCount}, var(--cell-size))`
     } as React.CSSProperties;
-  }, [result, cellSize]);
+  }, [colCount, rowCount, cellSize]);
+
+  const gridDimensions = useMemo(() => {
+    if (!colCount || !rowCount) return { width: 0, height: 0 };
+    return { width: colCount * cellSize, height: rowCount * cellSize };
+  }, [colCount, rowCount, cellSize]);
 
   const handleNextRow = () => {
-    if (!result) return;
-    setActiveRowIndex((prev) => Math.min(prev + 1, result.rowCount - 1));
+    if (!rowCount) return;
+    setActiveRowIndex((prev) => Math.min(prev + 1, rowCount - 1));
   };
 
   const handlePrevRow = () => {
     setActiveRowIndex((prev) => Math.max(prev - 1, 0));
   };
 
+  const handleDeleteRow = () => {
+    setRowsState((prev) => {
+      if (prev.length === 0) return prev;
+      const next = prev.filter((_, idx) => idx !== activeRowIndex);
+      const newIndex = Math.max(0, Math.min(activeRowIndex, next.length - 1));
+      setActiveRowIndex(newIndex);
+      return next;
+    });
+  };
+
   const activeRow = displayRows[activeRowIndex];
+  const rowCursorTop = rowCount ? (rowCount - activeRowIndex - 1) * cellSize : 0;
 
   const handleCopyPrompt = async () => {
     try {
@@ -340,9 +437,7 @@ export default function HomePage() {
 
   const activeRowSegments = useMemo(() => {
     if (!activeRow) return [] as { color: string; count: number }[];
-    const explicit = result?.rowDirections?.[activeRowIndex];
-    // If the pattern explicitly states the direction, assume the sequence is already in working order.
-    const shouldReverse = explicit ? false : currentDirectionIsRtl;
+    const shouldReverse = directionForRow(activeRowIndex) === 'rtl';
     const ordered = shouldReverse ? [...activeRow.row].reverse() : activeRow.row;
     const segments: { color: string; count: number }[] = [];
     ordered.forEach((colorName) => {
@@ -354,7 +449,7 @@ export default function HomePage() {
       }
     });
     return segments;
-  }, [activeRow, currentDirectionIsRtl, result?.rowDirections, activeRowIndex]);
+  }, [activeRow, activeRowIndex, directionForRow]);
 
   return (
     <main>
@@ -395,6 +490,9 @@ export default function HomePage() {
                 <button type="button" className="secondary" onClick={handleClear}>
                   Clear
                 </button>
+                <button type="button" className="secondary" onClick={handleExportTxt} disabled={!canRender}>
+                  Export TXT
+                </button>
                 <button type="button" className="secondary" onClick={handleExportPng} disabled={!canRender}>
                   Export PNG
                 </button>
@@ -434,8 +532,8 @@ export default function HomePage() {
               <span className={`status-pill ${errors.length === 0 && result ? 'success' : errors.length ? 'error' : ''}`}>
                 {status}
               </span>
-              <span className="status-pill">Rows: {result?.rowCount ?? '0'}</span>
-              <span className="status-pill">Cols: {result?.colCount ?? '—'}</span>
+              <span className="status-pill">Rows: {rowCount}</span>
+              <span className="status-pill">Cols: {colCount ?? '—'}</span>
               {fileName ? <span className="status-pill">{fileName}</span> : null}
             </div>
           </>
@@ -527,10 +625,10 @@ export default function HomePage() {
                     <div>
                       <span className="crochet-chip">Crochet mode</span>
                       <div className="crochet-row-label">
-                        Row {activeRowIndex + 1} / {result.rowCount}
+                        Row {activeRowIndex + 1} / {rowCount}
                       </div>
                       <div className="small">
-                        Direction: {currentDirectionIsRtl ? 'droite → gauche' : 'gauche → droite'} · Click “Next row” as you go
+                        Side: {currentDirectionIsRtl ? 'R (droite→gauche)' : 'W (gauche→droite)'} · Click “Next row” as you go
                       </div>
                 </div>
                 <div className="button-row">
@@ -543,17 +641,21 @@ export default function HomePage() {
                     onChange={(e) => jumpToRow(Number(e.target.value))}
                   >
                     {displayRows.map((row) => (
-                      <option key={`row-option-${row.originalIndex}`} value={row.originalIndex}>
-                        Row {row.originalIndex + 1} {row.originalIndex < activeRowIndex ? '✓' : ''}
+                      <option key={`row-option-${row.id}`} value={row.index}>
+                        Row {row.index + 1} · {sideLabelForRow(row.index)}{' '}
+                        {row.index < activeRowIndex ? '✓' : ''}
                       </option>
                     ))}
                   </select>
                   <button
                     type="button"
                     onClick={handleNextRow}
-                    disabled={activeRowIndex >= result.rowCount - 1}
+                    disabled={activeRowIndex >= rowCount - 1}
                   >
                     Next row
+                  </button>
+                  <button type="button" className="secondary danger" onClick={handleDeleteRow} disabled={!rowCount}>
+                    Delete row
                   </button>
                 </div>
               </div>
@@ -562,21 +664,20 @@ export default function HomePage() {
                     <div className="instruction-board">
                       <div className="instruction-meta">
                         <span>Follow row {activeRowIndex + 1}:</span>
+                        <span className="side-pill">
+                          {sideLabelForRow(activeRowIndex)} side
+                        </span>
                       </div>
                       <div className="segment-grid">
                         {activeRowSegments.map((segment, idx) => {
                           const fill = displayColors[segment.color] ?? stringToColor(segment.color);
-                          const glow = `${fill}33`;
-                          const soft = `${fill}18`;
                           return (
                             <div
                               key={`${segment.color}-${idx}`}
                               className="segment-card"
                               style={
                                 {
-                                  '--segment-color': fill,
-                                  boxShadow: `0 12px 28px ${glow}, 0 0 0 1px ${soft}`,
-                                  borderColor: fill
+                                  '--segment-color': fill
                                 } as React.CSSProperties
                           }
                         >
@@ -600,7 +701,7 @@ export default function HomePage() {
               <div className="toolbar">
                 <strong>Rendered grid</strong>
                 <span className="small">
-                  {result.rowCount} rows × {result.colCount} columns · {gridCells.length} cells
+                  {rowCount} rows × {colCount ?? '—'} columns · {gridCells.length} cells
                 </span>
               </div>
               <div className="grid-wrapper">
@@ -618,36 +719,50 @@ export default function HomePage() {
                         left: 0,
                         marginRight: 8,
                         display: 'grid',
-                        gridTemplateRows: `repeat(${result.rowCount}, var(--cell-size))`
+                        gridTemplateRows: `repeat(${rowCount}, var(--cell-size))`
                       }}
                     >
                       {displayRows.map((row) => (
                         <div
-                          key={`row-num-${row.originalIndex}`}
+                          key={`row-num-${row.id}`}
                           className={`row-number ${
-                            crochetMode && row.originalIndex === activeRowIndex ? 'active' : ''
-                          } ${crochetMode && row.originalIndex < activeRowIndex ? 'done' : ''}`}
+                            crochetMode && row.index === activeRowIndex ? 'active' : ''
+                          } ${crochetMode && row.index < activeRowIndex ? 'done' : ''}`}
                           style={{
                             height: cellSize,
                             lineHeight: `${cellSize}px`,
-                            gridRowStart: result.rowCount - row.originalIndex
+                            gridRowStart: rowCount - row.index
                           }}
                           role="button"
                           tabIndex={0}
-                          onClick={() => jumpToRow(row.originalIndex)}
+                          onClick={() => jumpToRow(row.index)}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' || e.key === ' ') {
                               e.preventDefault();
-                              jumpToRow(row.originalIndex);
+                              jumpToRow(row.index);
                             }
                           }}
                         >
-                          {row.originalIndex + 1}
+                          {row.index + 1}
                         </div>
                       ))}
                     </div>
                   )}
-                  <div className="grid" style={gridStyle}>
+                  <div
+                    className="grid-shell"
+                    style={{
+                      width: gridDimensions.width,
+                      height: gridDimensions.height
+                    }}
+                  >
+                    <div
+                      className="grid"
+                      style={{
+                        ...gridStyle,
+                        width: gridDimensions.width,
+                        height: gridDimensions.height
+                      }}
+                    >
                     {gridCells.map((cell) => {
                       const fill = displayColors[cell.color] ?? stringToColor(cell.color);
                       return (
@@ -666,7 +781,17 @@ export default function HomePage() {
                       );
                     })}
                   </div>
+                  {canRender && rowCount > 0 ? (
+                    <div className="row-cursor" style={{ top: rowCursorTop, height: cellSize }}>
+                      <div className="row-cursor-chip">
+                        <ArrowLeftToLine aria-hidden className="row-cursor-arrow" size={20} strokeWidth={2} />
+                        <span className="row-cursor-side">{sideLabelForRow(activeRowIndex)}</span>
+                        <span className="row-cursor-label">Row {activeRowIndex + 1} - CURRENT</span>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
+              </div>
               </div>
             </div>
           </div>
