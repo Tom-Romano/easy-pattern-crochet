@@ -967,10 +967,7 @@ export default function HomePage() {
 
   const activeRowSegments = useMemo(() => {
     if (!activeRow) return [] as { color: string; count: number }[];
-    const shouldReverse = directionForRow(activeRowIndex) === "rtl";
-    const ordered = shouldReverse
-      ? [...activeRow.row].reverse()
-      : activeRow.row;
+    const ordered = activeRow.row;
     const segments: { color: string; count: number }[] = [];
     ordered.forEach((colorName) => {
       const last = segments[segments.length - 1];
@@ -1185,23 +1182,6 @@ export default function HomePage() {
                       </div>
                       <div className="small">
                         Click any cell when in creation mode to paint it.
-                      </div>
-                      <div className="button-row">
-                        <button
-                          type="button"
-                          disabled={!creationMode || !rowsState.length}
-                          onClick={handleExitCreation}
-                        >
-                          Save & exit to crochet mode
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={handleEnableEditing}
-                          disabled={!rowsState.length}
-                        >
-                          Go to edit mode
-                        </button>
                       </div>
                     </div>
                   )}
@@ -1575,7 +1555,25 @@ export default function HomePage() {
 
           <div className="panel grid-panel">
             <div className="toolbar">
-              <strong>Rendered grid</strong>
+              <div className="toolbar-left">
+                <strong>Rendered grid</strong>
+                <button
+                  type="button"
+                  className="secondary slim"
+                  onClick={handleEnableEditing}
+                  disabled={creationMode || !rowsState.length || !colCount}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="secondary slim"
+                  onClick={handleExitCreation}
+                  disabled={!creationMode || !rowsState.length}
+                >
+                  Save
+                </button>
+              </div>
               <span className="small">
                 {rowCount} rows × {colCount ?? "—"} columns · {gridCells.length}{" "}
                 cells

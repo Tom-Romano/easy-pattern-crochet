@@ -627,9 +627,17 @@ input[type="color"]::-webkit-color-swatch-wrapper {
 .toolbar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px;
   margin: 12px 0 8px;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .small {
