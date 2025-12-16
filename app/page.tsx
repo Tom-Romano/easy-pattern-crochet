@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeftToLine } from 'lucide-react';
 import { parsePattern, type ParseResult } from '@/lib/parsePattern';
-import { stringToColor } from '@/lib/color';
+import { KNOWN_COLORS, stringToColor } from '@/lib/color';
 
 type RowDirection = 'ltr' | 'rtl';
 type WorkingRow = {
@@ -141,6 +141,207 @@ Ligne 3 (droite→gauche) : 13 blanc 1 vert 16 blanc`;
 
 const CONSENSUS_THRESHOLD = 0.9;
 
+const hexToRgb = (hex: string): [number, number, number] => {
+  const clean = hex.replace('#', '');
+  const num = Number.parseInt(clean, 16);
+  return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+};
+
+const rgbToHex = ([r, g, b]: [number, number, number]) =>
+  `#${[r, g, b]
+    .map((v) => Math.max(0, Math.min(255, Math.round(v))))
+    .map((v) => v.toString(16).padStart(2, '0'))
+    .join('')}`;
+
+const channelStep = (v: number) => Math.max(0, Math.min(255, Math.round(v / 32) * 32));
+
+const simplifyColor = (r: number, g: number, b: number): [number, number, number] => [
+  channelStep(r),
+  channelStep(g),
+  channelStep(b)
+];
+
+const distanceSq = (a: [number, number, number], b: [number, number, number]) =>
+  (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+
+const KNOWN_COLOR_ENTRIES = Object.entries(KNOWN_COLORS).map(([name, hex]) => ({
+  name,
+  rgb: hexToRgb(hex)
+}));
+
+const nearestKnownColor = (rgb: [number, number, number]) => {
+  let best = KNOWN_COLOR_ENTRIES[0];
+  let bestDist = Number.POSITIVE_INFINITY;
+  KNOWN_COLOR_ENTRIES.forEach((entry) => {
+    const dist = distanceSq(rgb, entry.rgb);
+    if (dist < bestDist) {
+      best = entry;
+      bestDist = dist;
+    }
+  });
+  return { name: best.name, hex: KNOWN_COLORS[best.name] };
+};
+
+const readFileAsDataUrl = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+      } else {
+        reject(new Error('Unsupported file content'));
+      }
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('Unable to read file'));
+    reader.readAsDataURL(file);
+  });
+
+const loadImageElement = (src: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Impossible de charger cette image.'));
+    img.src = src;
+  });
+
+const buildSegmentsText = (rowColors: string[]) => {
+  const segments: { color: string; count: number }[] = [];
+  rowColors.forEach((color) => {
+    const last = segments[segments.length - 1];
+    if (last && last.color === color) {
+      last.count += 1;
+    } else {
+      segments.push({ color, count: 1 });
+    }
+  });
+  return segments.map((seg) => `${seg.count} ${seg.color}`).join(' ');
+};
+
+type ImageConvertOptions = {
+  targetColumns: number;
+  maxColors: number;
+  serpentine: boolean;
+};
+
+const imageToPatternTxt = async (file: File, options: ImageConvertOptions) => {
+  const { targetColumns, maxColors, serpentine } = options;
+  const dataUrl = await readFileAsDataUrl(file);
+  const img = await loadImageElement(dataUrl);
+
+  const targetRows = Math.max(1, Math.round((img.height / img.width) * targetColumns));
+  const canvas = document.createElement('canvas');
+  canvas.width = targetColumns;
+  canvas.height = targetRows;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas non disponible.');
+
+  ctx.drawImage(img, 0, 0, targetColumns, targetRows);
+  const { data } = ctx.getImageData(0, 0, targetColumns, targetRows);
+
+  const histogram = new Map<string, { rgb: [number, number, number]; count: number }>();
+  for (let i = 0; i < data.length; i += 4) {
+    let r = data[i];
+    let g = data[i + 1];
+    let b = data[i + 2];
+    const a = data[i + 3];
+    if (a < 10) {
+      r = 255;
+      g = 255;
+      b = 255;
+    }
+    const simplified = simplifyColor(r, g, b);
+    const key = simplified.join(',');
+    const entry = histogram.get(key);
+    if (entry) {
+      entry.count += 1;
+    } else {
+      histogram.set(key, { rgb: simplified, count: 1 });
+    }
+  }
+
+  const palette = Array.from(histogram.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, Math.max(1, Math.min(maxColors, histogram.size)))
+    .map((entry) => entry.rgb);
+
+  const paletteNames: string[] = [];
+  const usedNames = new Set<string>();
+  palette.forEach((rgb, idx) => {
+    const { name } = nearestKnownColor(rgb);
+    let candidate = name;
+    if (usedNames.has(candidate)) {
+      let suffix = 2;
+      while (usedNames.has(`${candidate}_${suffix}`)) {
+        suffix += 1;
+      }
+      candidate = `${candidate}_${suffix}`;
+    }
+    usedNames.add(candidate);
+    paletteNames[idx] = candidate;
+  });
+
+  const lines: string[] = [];
+  for (let rowIdx = 0; rowIdx < targetRows; rowIdx += 1) {
+    const y = targetRows - 1 - rowIdx; // bottom row is Ligne 1
+    const direction = serpentine ? (rowIdx % 2 === 0 ? 'rtl' : 'ltr') : 'ltr';
+    const arrowText = direction === 'rtl' ? 'droite→gauche' : 'gauche→droite';
+    const rowColors: string[] = [];
+
+    if (direction === 'rtl') {
+      for (let x = targetColumns - 1; x >= 0; x -= 1) {
+        const idx = (y * targetColumns + x) * 4;
+        const rgb = simplifyColor(data[idx], data[idx + 1], data[idx + 2]);
+        let best = 0;
+        let bestDist = Number.POSITIVE_INFINITY;
+        palette.forEach((p, pIdx) => {
+          const dist = distanceSq(rgb, p);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = pIdx;
+          }
+        });
+        rowColors.push(paletteNames[best]);
+      }
+    } else {
+      for (let x = 0; x < targetColumns; x += 1) {
+        const idx = (y * targetColumns + x) * 4;
+        const rgb = simplifyColor(data[idx], data[idx + 1], data[idx + 2]);
+        let best = 0;
+        let bestDist = Number.POSITIVE_INFINITY;
+        palette.forEach((p, pIdx) => {
+          const dist = distanceSq(rgb, p);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = pIdx;
+          }
+        });
+        rowColors.push(paletteNames[best]);
+      }
+    }
+
+    lines.push(`Ligne ${rowIdx + 1} (${arrowText}) : ${buildSegmentsText(rowColors)}`);
+  }
+
+  const legendLines = palette
+    .map((rgb, idx) => `- ${paletteNames[idx]} : ${nearestKnownColor(rgb).name} (${rgbToHex(rgb)})`)
+    .join('\n');
+
+  const header = [
+    `Patron généré automatiquement à partir de ${file.name}`,
+    `Colonnes : ${targetColumns}`,
+    `Lignes : ${targetRows}`,
+    `Palette estimée (nom proche + hex) :`,
+    legendLines,
+    ''
+  ].join('\n');
+
+  return {
+    text: `${header}${lines.join('\n')}`,
+    cols: targetColumns,
+    rows: targetRows
+  };
+};
+
 export default function HomePage() {
   const [rawText, setRawText] = useState('');
   const [result, setResult] = useState<ParseResult | null>(null);
@@ -150,6 +351,10 @@ export default function HomePage() {
   const [fileName, setFileName] = useState<string>('');
   const [status, setStatus] = useState<string>('Waiting for file...');
   const [cellSize, setCellSize] = useState<number>(14);
+  const [targetColumns, setTargetColumns] = useState<number>(30);
+  const [maxColors, setMaxColors] = useState<number>(6);
+  const [imageStatus, setImageStatus] = useState<string>('No image uploaded');
+  const [imageFile, setImageFile] = useState<File | null>(null);
   const [showGridLines, setShowGridLines] = useState<boolean>(true);
   const [showRowNumbers, setShowRowNumbers] = useState<boolean>(true);
   const [serpentine, setSerpentine] = useState<boolean>(true);
@@ -160,6 +365,7 @@ export default function HomePage() {
   const [footerCollapsed, setFooterCollapsed] = useState<boolean>(false);
   const [copyStatus, setCopyStatus] = useState<string>('');
   const [customColors, setCustomColors] = useState<Record<string, string>>({});
+  const [inputMode, setInputMode] = useState<'text' | 'image'>('text');
 
   const handleParse = (text: string, label?: string) => {
     const parsed = parsePattern(text, { consensusThreshold: CONSENSUS_THRESHOLD });
@@ -195,6 +401,33 @@ export default function HomePage() {
     reader.readAsText(file, 'utf-8');
   };
 
+  const handleImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImageFile(file);
+    convertImageFile(file);
+  };
+
+  const convertImageFile = async (file: File) => {
+    setStatus('Converting image...');
+    setImageStatus(`Converting ${file.name}...`);
+    try {
+      const conversion = await imageToPatternTxt(file, { targetColumns, maxColors, serpentine });
+      handleParse(conversion.text, `${file.name.replace(/\.[^.]+$/, '')}-image.txt`);
+      setImageStatus(`Converted ${file.name} to ${conversion.cols}×${conversion.rows} grid`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Image conversion failed';
+      setImageStatus(message);
+      setStatus('Image conversion failed');
+      setErrors([message]);
+    }
+  };
+
+  const handleReconvertImage = () => {
+    if (!imageFile) return;
+    convertImageFile(imageFile);
+  };
+
   const handleLoadExample = () => {
     handleParse(EXAMPLE_TEXT, 'example.txt');
   };
@@ -209,6 +442,8 @@ export default function HomePage() {
     setCustomColors({});
     setStatus('Waiting for file...');
     setActiveRowIndex(0);
+    setImageStatus('No image uploaded');
+    setImageFile(null);
   };
 
   const displayColors = useMemo(() => {
@@ -478,53 +713,124 @@ export default function HomePage() {
 
         {!setupCollapsed && (
           <>
-            <div className="controls">
-              <div>
-                <label htmlFor="file-input">Upload .txt pattern</label>
-                <input id="file-input" type="file" accept=".txt" onChange={handleFileChange} />
+            <div className="setup-grid">
+              <div className="control-card">
+                <div className="card-head">Input</div>
+                <div className="card-body">
+                  <div className="mode-toggle">
+                    <button
+                      type="button"
+                      className={`mode-button ${inputMode === 'text' ? 'active' : ''}`}
+                      onClick={() => setInputMode('text')}
+                    >
+                      Upload .txt pattern
+                    </button>
+                    <button
+                      type="button"
+                      className={`mode-button ${inputMode === 'image' ? 'active' : ''}`}
+                      onClick={() => setInputMode('image')}
+                    >
+                      Upload image (PNG/JPG) to auto-convert
+                    </button>
+                  </div>
+                  {inputMode === 'text' ? (
+                    <div className="input-block">
+                      <label htmlFor="file-input">Choose .txt pattern</label>
+                      <input id="file-input" type="file" accept=".txt" onChange={handleFileChange} />
+                      <div className="small">Parse an existing pattern file.</div>
+                    </div>
+                  ) : (
+                    <div className="input-block">
+                      <label htmlFor="image-input">Choose image</label>
+                      <input id="image-input" type="file" accept="image/*" onChange={handleImageChange} />
+                      <div className="small">{imageStatus}</div>
+                      <div className="button-row" style={{ marginTop: 6 }}>
+                        <button type="button" onClick={handleReconvertImage} disabled={!imageFile}>
+                          Convert image with current sliders
+                        </button>
+                      </div>
+                      <div className="range-input">
+                        <span>Target columns (image → grid)</span>
+                        <input
+                          type="range"
+                          min={8}
+                          max={120}
+                          value={targetColumns}
+                          onChange={(e) => setTargetColumns(Number(e.target.value))}
+                        />
+                        <span className="small">{targetColumns} cols</span>
+                      </div>
+                      <div className="range-input">
+                        <span>Max colors from image</span>
+                        <input
+                          type="range"
+                          min={2}
+                          max={12}
+                          value={maxColors}
+                          onChange={(e) => setMaxColors(Number(e.target.value))}
+                        />
+                        <span className="small">{maxColors} colors</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="button-row">
-                <button type="button" onClick={handleLoadExample}>
-                  Load example
-                </button>
-                <button type="button" className="secondary" onClick={handleClear}>
-                  Clear
-                </button>
-                <button type="button" className="secondary" onClick={handleExportTxt} disabled={!canRender}>
-                  Export TXT
-                </button>
-                <button type="button" className="secondary" onClick={handleExportPng} disabled={!canRender}>
-                  Export PNG
-                </button>
+
+              <div className="control-card">
+                <div className="card-head">Actions</div>
+                <div className="card-body">
+                  <div className="button-row">
+                    <button type="button" onClick={handleLoadExample}>
+                      Load example
+                    </button>
+                    <button type="button" className="secondary" onClick={handleClear}>
+                      Clear
+                    </button>
+                  </div>
+                  <div className="button-row">
+                    <button type="button" className="secondary" onClick={handleExportTxt} disabled={!canRender}>
+                      Export TXT
+                    </button>
+                    <button type="button" className="secondary" onClick={handleExportPng} disabled={!canRender}>
+                      Export PNG
+                    </button>
+                  </div>
+                </div>
               </div>
-              <div className="toggles">
-                <label>
-                  <input type="checkbox" checked={showGridLines} onChange={(e) => setShowGridLines(e.target.checked)} />
-                  Show grid lines
-                </label>
-                <label>
-                  <input type="checkbox" checked={showRowNumbers} onChange={(e) => setShowRowNumbers(e.target.checked)} />
-                  Show row numbers
-                </label>
-                <label>
-                  <input type="checkbox" checked={serpentine} onChange={(e) => setSerpentine(e.target.checked)} />
-                  Serpentine mode (on by default)
-                </label>
-                <label>
-                  <input type="checkbox" checked={crochetMode} onChange={(e) => setCrochetMode(e.target.checked)} />
-                  Crochet mode (row focus)
-                </label>
-              </div>
-              <div className="range-input">
-                <span>Zoom</span>
-                <input
-                  type="range"
-                  min={4}
-                  max={28}
-                  value={cellSize}
-                  onChange={(e) => setCellSize(Number(e.target.value))}
-                />
-                <span className="small">{cellSize}px</span>
+
+              <div className="control-card">
+                <div className="card-head">Display</div>
+                <div className="card-body">
+                  <div className="toggles">
+                    <label>
+                      <input type="checkbox" checked={showGridLines} onChange={(e) => setShowGridLines(e.target.checked)} />
+                      Show grid lines
+                    </label>
+                    <label>
+                      <input type="checkbox" checked={showRowNumbers} onChange={(e) => setShowRowNumbers(e.target.checked)} />
+                      Show row numbers
+                    </label>
+                    <label>
+                      <input type="checkbox" checked={serpentine} onChange={(e) => setSerpentine(e.target.checked)} />
+                      Serpentine mode (on by default)
+                    </label>
+                    <label>
+                      <input type="checkbox" checked={crochetMode} onChange={(e) => setCrochetMode(e.target.checked)} />
+                      Crochet mode (row focus)
+                    </label>
+                  </div>
+                  <div className="range-input">
+                    <span>Zoom</span>
+                    <input
+                      type="range"
+                      min={4}
+                      max={28}
+                      value={cellSize}
+                      onChange={(e) => setCellSize(Number(e.target.value))}
+                    />
+                    <span className="small">{cellSize}px</span>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -535,6 +841,7 @@ export default function HomePage() {
               <span className="status-pill">Rows: {rowCount}</span>
               <span className="status-pill">Cols: {colCount ?? '—'}</span>
               {fileName ? <span className="status-pill">{fileName}</span> : null}
+              {inputMode === 'image' && imageStatus ? <span className="status-pill">{imageStatus}</span> : null}
             </div>
           </>
         )}

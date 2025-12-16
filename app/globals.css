@@ -65,6 +65,69 @@ p.lead {
   padding: 14px 16px 16px;
 }
 
+.mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.mode-button {
+  background: #f7f8fb;
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, transform 0.08s ease;
+}
+
+.mode-button:hover {
+  background: #eef1f7;
+  border-color: #d7dce5;
+}
+
+.mode-button:active {
+  transform: translateY(1px);
+}
+
+.mode-button.active {
+  background: #e9f1ff;
+  border-color: #2d6ae3;
+  box-shadow: 0 0 0 1px rgba(45, 106, 227, 0.3);
+}
+
+.setup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.control-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 12px 14px;
+  background: var(--panel-soft);
+}
+
+.card-head {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.input-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -75,13 +138,6 @@ p.lead {
 
 .panel strong {
   font-weight: 600;
-}
-
-.controls {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 14px;
-  align-items: flex-start;
 }
 
 .button-row {
