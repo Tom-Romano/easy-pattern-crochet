@@ -1,17 +1,19 @@
-'use client';
+"use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeftToLine } from 'lucide-react';
-import { parsePattern, type ParseResult } from '@/lib/parsePattern';
-import { KNOWN_COLORS, stringToColor } from '@/lib/color';
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowLeftToLine } from "lucide-react";
+import { parsePattern, type ParseResult } from "@/lib/parsePattern";
+import { KNOWN_COLORS, stringToColor } from "@/lib/color";
 
-type RowDirection = 'ltr' | 'rtl';
+type RowDirection = "ltr" | "rtl";
 type WorkingRow = {
   id: string;
   cells: string[];
   direction: RowDirection | null;
   originalRowNumber: number;
 };
+
+type InputMode = "text" | "image" | "create";
 
 const EXAMPLE_TEXT = `Patron crochet (30 colonnes x 107 lignes)
 Lecture en aller-retour, départ en bas à droite.
@@ -140,9 +142,76 @@ Ligne 2 (gauche→droite) : 30 blanc
 Ligne 3 (droite→gauche) : 13 blanc 1 vert 16 blanc`;
 
 const CONSENSUS_THRESHOLD = 0.9;
+const MODE_OPTIONS: InputMode[] = ["text", "image", "create"];
+const MODE_META: Record<InputMode, { label: string; description: string }> = {
+  text: {
+    label: "Upload .txt pattern",
+    description: "Open an existing pattern file and render it immediately.",
+  },
+  image: {
+    label: "Upload image (PNG/JPG)",
+    description:
+      "Convert a pixel-art image into rows. You can adjust the column count and palette size.",
+  },
+  create: {
+    label: "Create canvas",
+    description:
+      "Start from scratch: choose the size, paint with your palette, then export.",
+  },
+};
+const DEFAULT_BASE_COLOR = KNOWN_COLORS.blanc ?? "#ffffff";
+
+const normalizeColorName = (name: string) => {
+  const trimmed = name.trim().toLowerCase().replace(/\s+/g, "_");
+  const cleaned = trimmed.replace(/[^a-z0-9_]/g, "");
+  return cleaned || "couleur";
+};
+
+const buildWorkingRows = (
+  rows: number,
+  cols: number,
+  fill: string,
+): WorkingRow[] =>
+  Array.from({ length: rows }, (_, idx) => ({
+    id: `row-${idx + 1}`,
+    cells: Array.from({ length: cols }, () => fill),
+    direction: null,
+    originalRowNumber: idx + 1,
+  }));
+
+const buildManualResult = (
+  rows: WorkingRow[],
+  palette: Record<string, string>,
+): ParseResult => {
+  const rowCount = rows.length;
+  const colCount = rowCount > 0 ? rows[0].cells.length : null;
+  const colorSet = new Set<string>();
+  rows.forEach((r) => r.cells.forEach((c) => colorSet.add(c)));
+
+  const colorMap: Record<string, string> = {};
+  colorSet.forEach((name) => {
+    colorMap[name] = palette[name] ?? KNOWN_COLORS[name] ?? stringToColor(name);
+  });
+
+  const legend = Object.entries(colorMap).map(([name, color]) => ({
+    name,
+    color,
+  }));
+
+  return {
+    rows: rows.map((r) => r.cells),
+    rowCount,
+    colCount,
+    colorMap,
+    rowDirections: rows.map((r) => r.direction ?? null),
+    legend,
+    errors: [],
+    warnings: [],
+  };
+};
 
 const hexToRgb = (hex: string): [number, number, number] => {
-  const clean = hex.replace('#', '');
+  const clean = hex.replace("#", "");
   const num = Number.parseInt(clean, 16);
   return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
 };
@@ -150,23 +219,24 @@ const hexToRgb = (hex: string): [number, number, number] => {
 const rgbToHex = ([r, g, b]: [number, number, number]) =>
   `#${[r, g, b]
     .map((v) => Math.max(0, Math.min(255, Math.round(v))))
-    .map((v) => v.toString(16).padStart(2, '0'))
-    .join('')}`;
+    .map((v) => v.toString(16).padStart(2, "0"))
+    .join("")}`;
 
-const channelStep = (v: number) => Math.max(0, Math.min(255, Math.round(v / 32) * 32));
+const channelStep = (v: number) =>
+  Math.max(0, Math.min(255, Math.round(v / 32) * 32));
 
-const simplifyColor = (r: number, g: number, b: number): [number, number, number] => [
-  channelStep(r),
-  channelStep(g),
-  channelStep(b)
-];
+const simplifyColor = (
+  r: number,
+  g: number,
+  b: number,
+): [number, number, number] => [channelStep(r), channelStep(g), channelStep(b)];
 
 const distanceSq = (a: [number, number, number], b: [number, number, number]) =>
   (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
 
 const KNOWN_COLOR_ENTRIES = Object.entries(KNOWN_COLORS).map(([name, hex]) => ({
   name,
-  rgb: hexToRgb(hex)
+  rgb: hexToRgb(hex),
 }));
 
 const nearestKnownColor = (rgb: [number, number, number]) => {
@@ -186,13 +256,14 @@ const readFileAsDataUrl = (file: File) =>
   new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      if (typeof reader.result === 'string') {
+      if (typeof reader.result === "string") {
         resolve(reader.result);
       } else {
-        reject(new Error('Unsupported file content'));
+        reject(new Error("Unsupported file content"));
       }
     };
-    reader.onerror = () => reject(reader.error ?? new Error('Unable to read file'));
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("Unable to read file"));
     reader.readAsDataURL(file);
   });
 
@@ -200,7 +271,7 @@ const loadImageElement = (src: string) =>
   new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('Impossible de charger cette image.'));
+    img.onerror = () => reject(new Error("Impossible de charger cette image."));
     img.src = src;
   });
 
@@ -214,7 +285,7 @@ const buildSegmentsText = (rowColors: string[]) => {
       segments.push({ color, count: 1 });
     }
   });
-  return segments.map((seg) => `${seg.count} ${seg.color}`).join(' ');
+  return segments.map((seg) => `${seg.count} ${seg.color}`).join(" ");
 };
 
 type ImageConvertOptions = {
@@ -228,17 +299,23 @@ const imageToPatternTxt = async (file: File, options: ImageConvertOptions) => {
   const dataUrl = await readFileAsDataUrl(file);
   const img = await loadImageElement(dataUrl);
 
-  const targetRows = Math.max(1, Math.round((img.height / img.width) * targetColumns));
-  const canvas = document.createElement('canvas');
+  const targetRows = Math.max(
+    1,
+    Math.round((img.height / img.width) * targetColumns),
+  );
+  const canvas = document.createElement("canvas");
   canvas.width = targetColumns;
   canvas.height = targetRows;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas non disponible.');
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas non disponible.");
 
   ctx.drawImage(img, 0, 0, targetColumns, targetRows);
   const { data } = ctx.getImageData(0, 0, targetColumns, targetRows);
 
-  const histogram = new Map<string, { rgb: [number, number, number]; count: number }>();
+  const histogram = new Map<
+    string,
+    { rgb: [number, number, number]; count: number }
+  >();
   for (let i = 0; i < data.length; i += 4) {
     let r = data[i];
     let g = data[i + 1];
@@ -250,7 +327,7 @@ const imageToPatternTxt = async (file: File, options: ImageConvertOptions) => {
       b = 255;
     }
     const simplified = simplifyColor(r, g, b);
-    const key = simplified.join(',');
+    const key = simplified.join(",");
     const entry = histogram.get(key);
     if (entry) {
       entry.count += 1;
@@ -283,11 +360,11 @@ const imageToPatternTxt = async (file: File, options: ImageConvertOptions) => {
   const lines: string[] = [];
   for (let rowIdx = 0; rowIdx < targetRows; rowIdx += 1) {
     const y = targetRows - 1 - rowIdx; // bottom row is Ligne 1
-    const direction = serpentine ? (rowIdx % 2 === 0 ? 'rtl' : 'ltr') : 'ltr';
-    const arrowText = direction === 'rtl' ? 'droite→gauche' : 'gauche→droite';
+    const direction = serpentine ? (rowIdx % 2 === 0 ? "rtl" : "ltr") : "ltr";
+    const arrowText = direction === "rtl" ? "droite→gauche" : "gauche→droite";
     const rowColors: string[] = [];
 
-    if (direction === 'rtl') {
+    if (direction === "rtl") {
       for (let x = targetColumns - 1; x >= 0; x -= 1) {
         const idx = (y * targetColumns + x) * 4;
         const rgb = simplifyColor(data[idx], data[idx + 1], data[idx + 2]);
@@ -319,12 +396,17 @@ const imageToPatternTxt = async (file: File, options: ImageConvertOptions) => {
       }
     }
 
-    lines.push(`Ligne ${rowIdx + 1} (${arrowText}) : ${buildSegmentsText(rowColors)}`);
+    lines.push(
+      `Ligne ${rowIdx + 1} (${arrowText}) : ${buildSegmentsText(rowColors)}`,
+    );
   }
 
   const legendLines = palette
-    .map((rgb, idx) => `- ${paletteNames[idx]} : ${nearestKnownColor(rgb).name} (${rgbToHex(rgb)})`)
-    .join('\n');
+    .map(
+      (rgb, idx) =>
+        `- ${paletteNames[idx]} : ${nearestKnownColor(rgb).name} (${rgbToHex(rgb)})`,
+    )
+    .join("\n");
 
   const header = [
     `Patron généré automatiquement à partir de ${file.name}`,
@@ -332,57 +414,86 @@ const imageToPatternTxt = async (file: File, options: ImageConvertOptions) => {
     `Lignes : ${targetRows}`,
     `Palette estimée (nom proche + hex) :`,
     legendLines,
-    ''
-  ].join('\n');
+    "",
+  ].join("\n");
 
   return {
-    text: `${header}${lines.join('\n')}`,
+    text: `${header}${lines.join("\n")}`,
     cols: targetColumns,
-    rows: targetRows
+    rows: targetRows,
   };
 };
 
 export default function HomePage() {
-  const [rawText, setRawText] = useState('');
+  const [rawText, setRawText] = useState("");
   const [result, setResult] = useState<ParseResult | null>(null);
   const [rowsState, setRowsState] = useState<WorkingRow[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
-  const [fileName, setFileName] = useState<string>('');
-  const [status, setStatus] = useState<string>('Waiting for file...');
+  const [fileName, setFileName] = useState<string>("");
+  const [status, setStatus] = useState<string>("Waiting for file...");
   const [cellSize, setCellSize] = useState<number>(14);
   const [targetColumns, setTargetColumns] = useState<number>(30);
   const [maxColors, setMaxColors] = useState<number>(6);
-  const [imageStatus, setImageStatus] = useState<string>('No image uploaded');
+  const [imageStatus, setImageStatus] = useState<string>("No image uploaded");
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const [creationMode, setCreationMode] = useState<boolean>(false);
+  const [creationCols, setCreationCols] = useState<number>(30);
+  const [creationRows, setCreationRows] = useState<number>(30);
+  const [brushColorName, setBrushColorName] = useState<string>("blanc");
+  const [brushColorHex, setBrushColorHex] =
+    useState<string>(DEFAULT_BASE_COLOR);
+  const [creationPalette, setCreationPalette] = useState<
+    Record<string, string>
+  >({
+    blanc: DEFAULT_BASE_COLOR,
+  });
+  const [instructionDone, setInstructionDone] = useState<
+    Record<string, boolean>
+  >({});
+  const [newColorName, setNewColorName] = useState<string>("nouveau");
+  const [newColorHex, setNewColorHex] = useState<string>("#ff6b6b");
   const [showGridLines, setShowGridLines] = useState<boolean>(true);
   const [showRowNumbers, setShowRowNumbers] = useState<boolean>(true);
   const [serpentine, setSerpentine] = useState<boolean>(true);
   const [crochetMode, setCrochetMode] = useState<boolean>(true);
   const [activeRowIndex, setActiveRowIndex] = useState<number>(0);
   const [setupCollapsed, setSetupCollapsed] = useState<boolean>(false);
-  const [colorsCollapsed, setColorsCollapsed] = useState<boolean>(false);
+  const [colorsCollapsed] = useState<boolean>(false);
   const [footerCollapsed, setFooterCollapsed] = useState<boolean>(false);
-  const [copyStatus, setCopyStatus] = useState<string>('');
+  const [copyStatus, setCopyStatus] = useState<string>("");
   const [customColors, setCustomColors] = useState<Record<string, string>>({});
-  const [inputMode, setInputMode] = useState<'text' | 'image'>('text');
+  const [inputMode, setInputMode] = useState<InputMode>("text");
 
   const handleParse = (text: string, label?: string) => {
-    const parsed = parsePattern(text, { consensusThreshold: CONSENSUS_THRESHOLD });
+    const parsed = parsePattern(text, {
+      consensusThreshold: CONSENSUS_THRESHOLD,
+    });
     setResult(parsed);
     const workingRows: WorkingRow[] = parsed.rows.map((row, idx) => ({
       id: `row-${idx + 1}`,
       cells: row,
       direction: parsed.rowDirections[idx] ?? null,
-      originalRowNumber: idx + 1
+      originalRowNumber: idx + 1,
     }));
     setRowsState(workingRows);
     setErrors(parsed.errors);
     setWarnings(parsed.warnings);
     setRawText(text);
-    setFileName(label ?? '');
+    setFileName(label ?? "");
     setCustomColors({});
-    setStatus(parsed.errors.length === 0 ? 'Ready to render' : 'Parsing completed with issues');
+    setStatus(
+      parsed.errors.length === 0
+        ? "Ready to render"
+        : "Parsing completed with issues",
+    );
+    setCreationMode(false);
+    setCreationPalette({ blanc: DEFAULT_BASE_COLOR });
+    setBrushColorName("blanc");
+    setBrushColorHex(DEFAULT_BASE_COLOR);
+    setNewColorName("nouveau");
+    setNewColorHex("#ff6b6b");
+    setInstructionDone({});
   };
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -391,14 +502,14 @@ export default function HomePage() {
 
     const reader = new FileReader();
     reader.onload = () => {
-      const text = typeof reader.result === 'string' ? reader.result : '';
+      const text = typeof reader.result === "string" ? reader.result : "";
       handleParse(text, file.name);
     };
     reader.onerror = () => {
-      setStatus('Failed to read file');
-      setErrors([reader.error?.message || 'Unable to read file']);
+      setStatus("Failed to read file");
+      setErrors([reader.error?.message || "Unable to read file"]);
     };
-    reader.readAsText(file, 'utf-8');
+    reader.readAsText(file, "utf-8");
   };
 
   const handleImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -409,16 +520,26 @@ export default function HomePage() {
   };
 
   const convertImageFile = async (file: File) => {
-    setStatus('Converting image...');
+    setStatus("Converting image...");
     setImageStatus(`Converting ${file.name}...`);
     try {
-      const conversion = await imageToPatternTxt(file, { targetColumns, maxColors, serpentine });
-      handleParse(conversion.text, `${file.name.replace(/\.[^.]+$/, '')}-image.txt`);
-      setImageStatus(`Converted ${file.name} to ${conversion.cols}×${conversion.rows} grid`);
+      const conversion = await imageToPatternTxt(file, {
+        targetColumns,
+        maxColors,
+        serpentine,
+      });
+      handleParse(
+        conversion.text,
+        `${file.name.replace(/\.[^.]+$/, "")}-image.txt`,
+      );
+      setImageStatus(
+        `Converted ${file.name} to ${conversion.cols}×${conversion.rows} grid`,
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Image conversion failed';
+      const message =
+        err instanceof Error ? err.message : "Image conversion failed";
       setImageStatus(message);
-      setStatus('Image conversion failed');
+      setStatus("Image conversion failed");
       setErrors([message]);
     }
   };
@@ -428,22 +549,164 @@ export default function HomePage() {
     convertImageFile(imageFile);
   };
 
+  const syncManualResult = (
+    rows: WorkingRow[],
+    palette: Record<string, string>,
+    statusText = "Creation mode",
+  ) => {
+    const res = buildManualResult(rows, palette);
+    setResult(res);
+    setErrors([]);
+    setWarnings([]);
+    setStatus(statusText);
+  };
+
+  const applyManualGrid = (
+    rows: WorkingRow[],
+    palette: Record<string, string>,
+    statusText = "Creation mode",
+  ) => {
+    setRowsState(rows);
+    setCreationPalette(palette);
+    setCreationMode(true);
+    setCrochetMode(true);
+    syncManualResult(rows, palette, statusText);
+    setFileName("canvas");
+    setRawText("");
+  };
+
+  const handleCreateCanvas = () => {
+    const cols = Math.max(1, Math.min(200, creationCols || 1));
+    const rows = Math.max(1, Math.min(400, creationRows || 1));
+    setCreationCols(cols);
+    setCreationRows(rows);
+    const colorName = normalizeColorName(brushColorName || "blanc");
+    const palette = {
+      ...creationPalette,
+      [colorName]: brushColorHex || DEFAULT_BASE_COLOR,
+    };
+    const working = buildWorkingRows(rows, cols, colorName);
+    applyManualGrid(working, palette, "Creation mode");
+  };
+
+  const handleEnableEditing = () => {
+    if (!rowsState.length || !colCount) return;
+    const palette = { ...creationPalette };
+    rowsState.forEach((row) =>
+      row.cells.forEach((c) => {
+        if (!palette[c]) {
+          palette[c] = KNOWN_COLORS[c] ?? stringToColor(c);
+        }
+      }),
+    );
+    setCreationCols(colCount);
+    setCreationRows(rowsState.length);
+    applyManualGrid(
+      rowsState.map((row) => ({ ...row, cells: [...row.cells] })),
+      palette,
+      "Creation mode (editing existing grid)",
+    );
+    setInstructionDone({});
+  };
+
+  const handleExitCreation = () => {
+    if (!rowsState.length) return;
+    setCreationMode(false);
+    setStatus("Ready to crochet");
+  };
+
+  const handleFillCanvas = () => {
+    if (!creationMode || rowsState.length === 0) return;
+    const colorName = normalizeColorName(brushColorName || "blanc");
+    const palette = {
+      ...creationPalette,
+      [colorName]: brushColorHex || DEFAULT_BASE_COLOR,
+    };
+    const updated = rowsState.map((row) => ({
+      ...row,
+      cells: row.cells.map(() => colorName),
+    }));
+    applyManualGrid(updated, palette, "Canvas filled");
+  };
+
+  const handlePaintCell = (rowIdx: number, colIdx: number) => {
+    if (!creationMode) return;
+    const colorName = normalizeColorName(brushColorName || "blanc");
+    const palette = {
+      ...creationPalette,
+      [colorName]: brushColorHex || DEFAULT_BASE_COLOR,
+    };
+    const updatedRows = rowsState.map((row, idx) => {
+      if (idx !== rowIdx) return row;
+      const cells = [...row.cells];
+      cells[colIdx] = colorName;
+      return { ...row, cells };
+    });
+    applyManualGrid(updatedRows, palette, "Creation mode");
+  };
+
+  const handleBrushNameChange = (value: string) => {
+    setBrushColorName(value);
+    const normalized = normalizeColorName(value || "couleur");
+    const known = KNOWN_COLORS[normalized];
+    if (known) {
+      setBrushColorHex(known);
+      const palette = { ...creationPalette, [normalized]: known };
+      setCreationPalette(palette);
+      if (creationMode && rowsState.length > 0) {
+        syncManualResult(rowsState, palette, "Creation mode");
+      }
+    }
+  };
+
+  const handleBrushHexChange = (value: string) => {
+    setBrushColorHex(value);
+    const normalized = normalizeColorName(brushColorName || "couleur");
+    const palette = {
+      ...creationPalette,
+      [normalized]: value || DEFAULT_BASE_COLOR,
+    };
+    setCreationPalette(palette);
+    if (creationMode && rowsState.length > 0) {
+      syncManualResult(rowsState, palette, "Creation mode");
+    }
+  };
+
+  const handleAddPaletteColor = () => {
+    const name = normalizeColorName(newColorName || "couleur");
+    const hex = newColorHex || DEFAULT_BASE_COLOR;
+    const palette = { ...creationPalette, [name]: hex };
+    setCreationPalette(palette);
+    setBrushColorName(name);
+    setBrushColorHex(hex);
+    if (creationMode && rowsState.length > 0) {
+      syncManualResult(rowsState, palette, "Creation mode");
+    }
+  };
+
   const handleLoadExample = () => {
-    handleParse(EXAMPLE_TEXT, 'example.txt');
+    handleParse(EXAMPLE_TEXT, "example.txt");
   };
 
   const handleClear = () => {
-    setRawText('');
+    setRawText("");
     setResult(null);
     setRowsState([]);
     setErrors([]);
     setWarnings([]);
-    setFileName('');
+    setFileName("");
     setCustomColors({});
-    setStatus('Waiting for file...');
+    setStatus("Waiting for file...");
     setActiveRowIndex(0);
-    setImageStatus('No image uploaded');
+    setImageStatus("No image uploaded");
     setImageFile(null);
+    setCreationMode(false);
+    setCreationPalette({ blanc: DEFAULT_BASE_COLOR });
+    setBrushColorName("blanc");
+    setBrushColorHex(DEFAULT_BASE_COLOR);
+    setNewColorName("nouveau");
+    setNewColorHex("#ff6b6b");
+    setInstructionDone({});
   };
 
   const displayColors = useMemo(() => {
@@ -464,10 +727,10 @@ export default function HomePage() {
 
   const canRender = Boolean(
     result &&
-      colCount &&
-      rowCount > 0 &&
-      errors.length === 0 &&
-      rowsState.every((r) => r.cells.length === colCount)
+    colCount &&
+    rowCount > 0 &&
+    errors.length === 0 &&
+    rowsState.every((r) => r.cells.length === colCount),
   );
 
   const displayRows = useMemo(
@@ -477,9 +740,9 @@ export default function HomePage() {
         direction: row.direction,
         id: row.id,
         index: idx,
-        originalRowNumber: row.originalRowNumber
+        originalRowNumber: row.originalRowNumber,
       })),
-    [rowsState]
+    [rowsState],
   );
 
   useEffect(() => {
@@ -503,26 +766,43 @@ export default function HomePage() {
       if (serpentine) {
         const original = rowsState[rowIndex]?.originalRowNumber ?? rowIndex + 1;
         const serpentineIndex = original - 1; // start bottom row as 0
-        return serpentineIndex % 2 === 0 ? 'rtl' : 'ltr';
+        return serpentineIndex % 2 === 0 ? "rtl" : "ltr";
       }
-      return 'ltr';
+      return "ltr";
     },
-    [rowsState, serpentine]
+    [rowsState, serpentine],
   );
 
-  const sideLabelForRow = (rowIndex: number) => (directionForRow(rowIndex) === 'rtl' ? 'R' : 'W');
+  const sideLabelForRow = (rowIndex: number) =>
+    directionForRow(rowIndex) === "rtl" ? "R" : "W";
 
-  const currentDirectionIsRtl = rowCount ? directionForRow(activeRowIndex) === 'rtl' : false;
+  const currentDirectionIsRtl = rowCount
+    ? directionForRow(activeRowIndex) === "rtl"
+    : false;
 
   const gridCells = useMemo(() => {
     if (!colCount || rowCount === 0) {
-      return [] as { key: string; color: string; rowPos: number; colPos: number; originalRow: number }[];
+      return [] as {
+        key: string;
+        color: string;
+        rowPos: number;
+        colPos: number;
+        originalRow: number;
+        colIndex: number;
+      }[];
     }
 
-    const cells: { key: string; color: string; rowPos: number; colPos: number; originalRow: number }[] = [];
+    const cells: {
+      key: string;
+      color: string;
+      rowPos: number;
+      colPos: number;
+      originalRow: number;
+      colIndex: number;
+    }[] = [];
 
     displayRows.forEach((entry, idx) => {
-      const rtl = directionForRow(idx) === 'rtl';
+      const rtl = directionForRow(idx) === "rtl";
       const rowPos = rowCount - idx; // CSS grid rows start at 1 from top
 
       entry.row.forEach((color, colIdx) => {
@@ -532,7 +812,8 @@ export default function HomePage() {
           color,
           rowPos,
           colPos,
-          originalRow: idx
+          originalRow: idx,
+          colIndex: colIdx,
         });
       });
     });
@@ -541,17 +822,17 @@ export default function HomePage() {
 
   const handleExportPng = () => {
     if (!colCount || !canRender || rowCount === 0) return;
-    const canvas = document.createElement('canvas');
+    const canvas = document.createElement("canvas");
     canvas.width = colCount * cellSize;
     canvas.height = rowCount * cellSize;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     const colsTotal = colCount;
     const rowsTotal = rowCount;
 
     displayRows.forEach((entry, idx) => {
-      const rtl = directionForRow(idx) === 'rtl';
+      const rtl = directionForRow(idx) === "rtl";
       const y = (rowsTotal - 1 - idx) * cellSize; // bottom row stays at canvas bottom
 
       entry.row.forEach((colorName, colIdx) => {
@@ -560,23 +841,23 @@ export default function HomePage() {
         ctx.fillStyle = fill;
         ctx.fillRect(x, y, cellSize, cellSize);
         if (showGridLines) {
-          ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+          ctx.strokeStyle = "rgba(0,0,0,0.7)";
           ctx.strokeRect(x + 0.5, y + 0.5, cellSize, cellSize);
         }
       });
     });
 
-    const link = document.createElement('a');
-    link.download = `${fileName || 'pattern'}.png`;
-    link.href = canvas.toDataURL('image/png');
+    const link = document.createElement("a");
+    link.download = `${fileName || "pattern"}.png`;
+    link.href = canvas.toDataURL("image/png");
     link.click();
   };
 
   const serializeRow = useCallback(
     (cells: string[], rowIndex: number) => {
       const direction = directionForRow(rowIndex);
-      const arrowText = direction === 'rtl' ? 'droite→gauche' : 'gauche→droite';
-      const side = direction === 'rtl' ? 'R' : 'W';
+      const arrowText = direction === "rtl" ? "droite→gauche" : "gauche→droite";
+      const side = direction === "rtl" ? "R" : "W";
       const segments: { color: string; count: number }[] = [];
       cells.forEach((color) => {
         const last = segments[segments.length - 1];
@@ -586,43 +867,47 @@ export default function HomePage() {
           segments.push({ color, count: 1 });
         }
       });
-      const segmentText = segments.map((seg) => `${seg.count} ${seg.color}`).join(' ');
+      const segmentText = segments
+        .map((seg) => `${seg.count} ${seg.color}`)
+        .join(" ");
       return `Ligne ${rowIndex + 1} (${side} ${arrowText}) : ${segmentText}`;
     },
-    [directionForRow]
+    [directionForRow],
   );
 
   const handleExportTxt = () => {
     if (!rowCount || !canRender) return;
     const legendLines = Object.entries(displayColors)
       .map(([name, color]) => `- ${name} : ${color.toUpperCase()}`)
-      .join('\n');
-    const rowLines = displayRows.map((entry, idx) => serializeRow(entry.row, idx)).join('\n');
+      .join("\n");
+    const rowLines = displayRows
+      .map((entry, idx) => serializeRow(entry.row, idx))
+      .join("\n");
     const header = [
-      'Patron crochet exporté',
-      `Colonnes : ${colCount ?? '—'}`,
+      "Patron crochet exporté",
+      `Colonnes : ${colCount ?? "—"}`,
       `Lignes : ${rowCount}`,
-      'Palette (nom -> hex) :',
+      "Palette (nom -> hex) :",
       legendLines,
-      ''
-    ].join('\n');
+      "",
+    ].join("\n");
     const content = `${header}${rowLines}`;
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
+    const link = document.createElement("a");
     link.href = url;
-    link.download = `${fileName?.replace(/\\.txt$/i, '') || 'pattern'}-modifie.txt`;
+    link.download = `${fileName?.replace(/\\.txt$/i, "") || "pattern"}-modifie.txt`;
     link.click();
     URL.revokeObjectURL(url);
   };
 
   const gridStyle: React.CSSProperties = useMemo(() => {
-    const base = { '--cell-size': `${cellSize}px` } as React.CSSProperties;
+    const base = { "--cell-size": `${cellSize}px` } as React.CSSProperties;
     if (!colCount || !rowCount) return base;
     return {
       ...base,
       gridTemplateColumns: `repeat(${colCount}, var(--cell-size))`,
-      gridTemplateRows: `repeat(${rowCount}, var(--cell-size))`
+      gridTemplateRows: `repeat(${rowCount}, var(--cell-size))`,
     } as React.CSSProperties;
   }, [colCount, rowCount, cellSize]);
 
@@ -646,34 +931,46 @@ export default function HomePage() {
       const next = prev.filter((_, idx) => idx !== activeRowIndex);
       const newIndex = Math.max(0, Math.min(activeRowIndex, next.length - 1));
       setActiveRowIndex(newIndex);
+      if (creationMode) {
+        if (next.length === 0) {
+          setResult(null);
+          setCreationMode(false);
+        } else {
+          syncManualResult(next, creationPalette, "Creation mode");
+        }
+      }
       return next;
     });
   };
 
   const activeRow = displayRows[activeRowIndex];
-  const rowCursorTop = rowCount ? (rowCount - activeRowIndex - 1) * cellSize : 0;
+  const rowCursorTop = rowCount
+    ? (rowCount - activeRowIndex - 1) * cellSize
+    : 0;
 
   const handleCopyPrompt = async () => {
     try {
       await navigator.clipboard.writeText(CONVERSION_PROMPT);
-      setCopyStatus('Copied!');
-      setTimeout(() => setCopyStatus(''), 1500);
+      setCopyStatus("Copied!");
+      setTimeout(() => setCopyStatus(""), 1500);
     } catch (err) {
-      setCopyStatus('Clipboard blocked—copy manually.');
+      setCopyStatus("Clipboard blocked—copy manually.");
     }
   };
 
   const handleScrollToPrompt = () => {
-    const el = document.getElementById('prompt-footer');
+    const el = document.getElementById("prompt-footer");
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth' });
+      el.scrollIntoView({ behavior: "smooth" });
     }
   };
 
   const activeRowSegments = useMemo(() => {
     if (!activeRow) return [] as { color: string; count: number }[];
-    const shouldReverse = directionForRow(activeRowIndex) === 'rtl';
-    const ordered = shouldReverse ? [...activeRow.row].reverse() : activeRow.row;
+    const shouldReverse = directionForRow(activeRowIndex) === "rtl";
+    const ordered = shouldReverse
+      ? [...activeRow.row].reverse()
+      : activeRow.row;
     const segments: { color: string; count: number }[] = [];
     ordered.forEach((colorName) => {
       const last = segments[segments.length - 1];
@@ -686,12 +983,27 @@ export default function HomePage() {
     return segments;
   }, [activeRow, activeRowIndex, directionForRow]);
 
+  const toggleSegmentDone = (rowIndex: number, segmentIndex: number) => {
+    const key = `${rowIndex}-${segmentIndex}`;
+    setInstructionDone((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
+
   return (
     <main>
       <h1>Crochet / Pixel Pattern Renderer</h1>
-      <p className="lead">Upload a TXT pattern and crochet row by row with a clear grid and focused instructions.</p>
+      <p className="lead">
+        Upload a TXT pattern and crochet row by row with a clear grid and
+        focused instructions.
+      </p>
       <div className="button-row" style={{ marginTop: -6 }}>
-        <button type="button" className="secondary slim" onClick={handleScrollToPrompt}>
+        <button
+          type="button"
+          className="secondary slim"
+          onClick={handleScrollToPrompt}
+        >
           Need a TXT that always works? Use the prompt below
         </button>
       </div>
@@ -702,146 +1014,318 @@ export default function HomePage() {
             <strong>Setup</strong>
             {setupCollapsed && (
               <span className="small" style={{ marginLeft: 8 }}>
-                {fileName || 'No file'} · {result?.rowCount ?? 0} rows
+                {fileName || "No file"} · {result?.rowCount ?? 0} rows
               </span>
             )}
           </div>
-          <button type="button" className="secondary slim" onClick={() => setSetupCollapsed((v) => !v)}>
-            {setupCollapsed ? 'Show' : 'Hide'}
+          <button
+            type="button"
+            className="secondary slim"
+            onClick={() => setSetupCollapsed((v) => !v)}
+          >
+            {setupCollapsed ? "Show" : "Hide"}
           </button>
         </div>
 
         {!setupCollapsed && (
           <>
             <div className="setup-grid">
-              <div className="control-card">
-                <div className="card-head">Input</div>
-                <div className="card-body">
-                  <div className="mode-toggle">
+              <div className="control-card mode-panel">
+                <div className="panel-head" style={{ marginBottom: 6 }}>
+                  <strong>Choose your workflow</strong>
+                </div>
+                <div className="mode-selector">
+                  {MODE_OPTIONS.map((mode) => (
                     <button
+                      key={mode}
                       type="button"
-                      className={`mode-button ${inputMode === 'text' ? 'active' : ''}`}
-                      onClick={() => setInputMode('text')}
+                      className={`mode-button ${inputMode === mode ? "active" : ""}`}
+                      onClick={() => setInputMode(mode)}
                     >
-                      Upload .txt pattern
+                      {MODE_META[mode].label}
                     </button>
-                    <button
-                      type="button"
-                      className={`mode-button ${inputMode === 'image' ? 'active' : ''}`}
-                      onClick={() => setInputMode('image')}
-                    >
-                      Upload image (PNG/JPG) to auto-convert
-                    </button>
-                  </div>
-                  {inputMode === 'text' ? (
-                    <div className="input-block">
-                      <label htmlFor="file-input">Choose .txt pattern</label>
-                      <input id="file-input" type="file" accept=".txt" onChange={handleFileChange} />
-                      <div className="small">Parse an existing pattern file.</div>
+                  ))}
+                </div>
+                <div className="mode-body">
+                  {inputMode === "text" && (
+                    <div className="input-mode-content">
+                      <p className="small">{MODE_META.text.description}</p>
+                      <div className="input-block">
+                        <label htmlFor="file-input">Choose .txt pattern</label>
+                        <input
+                          id="file-input"
+                          type="file"
+                          accept=".txt"
+                          onChange={handleFileChange}
+                        />
+                        <div className="small">
+                          Parse an existing pattern file.
+                        </div>
+                      </div>
                     </div>
-                  ) : (
-                    <div className="input-block">
-                      <label htmlFor="image-input">Choose image</label>
-                      <input id="image-input" type="file" accept="image/*" onChange={handleImageChange} />
-                      <div className="small">{imageStatus}</div>
-                      <div className="button-row" style={{ marginTop: 6 }}>
-                        <button type="button" onClick={handleReconvertImage} disabled={!imageFile}>
-                          Convert image with current sliders
+                  )}
+                  {inputMode === "image" && (
+                    <div className="input-mode-content">
+                      <p className="small">{MODE_META.image.description}</p>
+                      <div className="input-block">
+                        <label htmlFor="image-input">Choose image</label>
+                        <input
+                          id="image-input"
+                          type="file"
+                          accept="image/*"
+                          onChange={handleImageChange}
+                        />
+                        <div className="small">{imageStatus}</div>
+                        <div className="button-row" style={{ marginTop: 6 }}>
+                          <button
+                            type="button"
+                            onClick={handleReconvertImage}
+                            disabled={!imageFile}
+                          >
+                            Convert with current sliders
+                          </button>
+                        </div>
+                        <div className="range-input">
+                          <span>Target columns (image → grid)</span>
+                          <input
+                            type="range"
+                            min={8}
+                            max={120}
+                            value={targetColumns}
+                            onChange={(e) =>
+                              setTargetColumns(Number(e.target.value))
+                            }
+                          />
+                          <span className="small">{targetColumns} cols</span>
+                        </div>
+                        <div className="range-input">
+                          <span>Max colors from image</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={12}
+                            value={maxColors}
+                            onChange={(e) =>
+                              setMaxColors(Number(e.target.value))
+                            }
+                          />
+                          <span className="small">{maxColors} colors</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {inputMode === "create" && (
+                    <div className="input-mode-content">
+                      <p className="small">{MODE_META.create.description}</p>
+                      <div className="inline-fields">
+                        <div className="input-block">
+                          <label htmlFor="creation-cols">Columns</label>
+                          <input
+                            id="creation-cols"
+                            type="number"
+                            min={1}
+                            max={200}
+                            value={creationCols}
+                            onChange={(e) =>
+                              setCreationCols(Number(e.target.value))
+                            }
+                          />
+                        </div>
+                        <div className="input-block">
+                          <label htmlFor="creation-rows">Rows</label>
+                          <input
+                            id="creation-rows"
+                            type="number"
+                            min={1}
+                            max={400}
+                            value={creationRows}
+                            onChange={(e) =>
+                              setCreationRows(Number(e.target.value))
+                            }
+                          />
+                        </div>
+                      </div>
+                      <div className="button-row">
+                        <button type="button" onClick={handleCreateCanvas}>
+                          Create blank canvas
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={handleFillCanvas}
+                          disabled={!creationMode || !rowsState.length}
+                        >
+                          Fill canvas with brush
                         </button>
                       </div>
-                      <div className="range-input">
-                        <span>Target columns (image → grid)</span>
-                        <input
-                          type="range"
-                          min={8}
-                          max={120}
-                          value={targetColumns}
-                          onChange={(e) => setTargetColumns(Number(e.target.value))}
-                        />
-                        <span className="small">{targetColumns} cols</span>
+                      <div className="inline-fields">
+                        <div className="input-block">
+                          <label htmlFor="brush-name">Brush name</label>
+                          <input
+                            id="brush-name"
+                            type="text"
+                            value={brushColorName}
+                            onChange={(e) =>
+                              handleBrushNameChange(e.target.value)
+                            }
+                            placeholder="e.g., vert_clair"
+                          />
+                        </div>
+                        <div className="input-block">
+                          <label htmlFor="brush-hex">Brush color</label>
+                          <input
+                            id="brush-hex"
+                            type="color"
+                            value={brushColorHex}
+                            onChange={(e) =>
+                              handleBrushHexChange(e.target.value)
+                            }
+                          />
+                        </div>
                       </div>
-                      <div className="range-input">
-                        <span>Max colors from image</span>
-                        <input
-                          type="range"
-                          min={2}
-                          max={12}
-                          value={maxColors}
-                          onChange={(e) => setMaxColors(Number(e.target.value))}
-                        />
-                        <span className="small">{maxColors} colors</span>
+                      <div className="small">
+                        Click any cell when in creation mode to paint it.
+                      </div>
+                      <div className="button-row">
+                        <button
+                          type="button"
+                          disabled={!creationMode || !rowsState.length}
+                          onClick={handleExitCreation}
+                        >
+                          Save & exit to crochet mode
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={handleEnableEditing}
+                          disabled={!rowsState.length}
+                        >
+                          Go to edit mode
+                        </button>
                       </div>
                     </div>
                   )}
                 </div>
-              </div>
-
-              <div className="control-card">
-                <div className="card-head">Actions</div>
-                <div className="card-body">
-                  <div className="button-row">
-                    <button type="button" onClick={handleLoadExample}>
-                      Load example
-                    </button>
-                    <button type="button" className="secondary" onClick={handleClear}>
-                      Clear
-                    </button>
-                  </div>
-                  <div className="button-row">
-                    <button type="button" className="secondary" onClick={handleExportTxt} disabled={!canRender}>
-                      Export TXT
-                    </button>
-                    <button type="button" className="secondary" onClick={handleExportPng} disabled={!canRender}>
-                      Export PNG
-                    </button>
-                  </div>
+                <div className="mode-switch-row">
+                  <span className="small">Quick switch:</span>
+                  {MODE_OPTIONS.filter((mode) => mode !== inputMode).map(
+                    (mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        className="mode-switch-button"
+                        onClick={() => setInputMode(mode)}
+                      >
+                        {MODE_META[mode].label}
+                      </button>
+                    ),
+                  )}
                 </div>
               </div>
 
-              <div className="control-card">
-                <div className="card-head">Display</div>
-                <div className="card-body">
-                  <div className="toggles">
-                    <label>
-                      <input type="checkbox" checked={showGridLines} onChange={(e) => setShowGridLines(e.target.checked)} />
-                      Show grid lines
-                    </label>
-                    <label>
-                      <input type="checkbox" checked={showRowNumbers} onChange={(e) => setShowRowNumbers(e.target.checked)} />
-                      Show row numbers
-                    </label>
-                    <label>
-                      <input type="checkbox" checked={serpentine} onChange={(e) => setSerpentine(e.target.checked)} />
-                      Serpentine mode (on by default)
-                    </label>
-                    <label>
-                      <input type="checkbox" checked={crochetMode} onChange={(e) => setCrochetMode(e.target.checked)} />
-                      Crochet mode (row focus)
-                    </label>
+              <div className="setup-actions">
+                <div className="control-card">
+                  <div className="card-head">Actions</div>
+                  <div className="card-body">
+                    <div className="button-row">
+                      <button type="button" onClick={handleLoadExample}>
+                        Load example
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={handleClear}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={handleExportTxt}
+                        disabled={!canRender}
+                      >
+                        Export TXT
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={handleExportPng}
+                        disabled={!canRender}
+                      >
+                        Export PNG
+                      </button>
+                    </div>
                   </div>
-                  <div className="range-input">
-                    <span>Zoom</span>
-                    <input
-                      type="range"
-                      min={4}
-                      max={28}
-                      value={cellSize}
-                      onChange={(e) => setCellSize(Number(e.target.value))}
-                    />
-                    <span className="small">{cellSize}px</span>
+                </div>
+
+                <div className="control-card">
+                  <div className="card-head">Display</div>
+                  <div className="card-body">
+                    <div className="toggles">
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={showGridLines}
+                          onChange={(e) => setShowGridLines(e.target.checked)}
+                        />
+                        Show grid lines
+                      </label>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={showRowNumbers}
+                          onChange={(e) => setShowRowNumbers(e.target.checked)}
+                        />
+                        Show row numbers
+                      </label>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={serpentine}
+                          onChange={(e) => setSerpentine(e.target.checked)}
+                        />
+                        Serpentine mode (on by default)
+                      </label>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={crochetMode}
+                          onChange={(e) => setCrochetMode(e.target.checked)}
+                        />
+                        Crochet mode (row focus)
+                      </label>
+                    </div>
+                    <div className="range-input">
+                      <span>Zoom</span>
+                      <input
+                        type="range"
+                        min={4}
+                        max={28}
+                        value={cellSize}
+                        onChange={(e) => setCellSize(Number(e.target.value))}
+                      />
+                      <span className="small">{cellSize}px</span>
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
-
             <div className="status-row">
-              <span className={`status-pill ${errors.length === 0 && result ? 'success' : errors.length ? 'error' : ''}`}>
+              <span
+                className={`status-pill ${errors.length === 0 && result ? "success" : errors.length ? "error" : ""}`}
+              >
                 {status}
               </span>
               <span className="status-pill">Rows: {rowCount}</span>
-              <span className="status-pill">Cols: {colCount ?? '—'}</span>
-              {fileName ? <span className="status-pill">{fileName}</span> : null}
-              {inputMode === 'image' && imageStatus ? <span className="status-pill">{imageStatus}</span> : null}
+              <span className="status-pill">Cols: {colCount ?? "—"}</span>
+              {fileName ? (
+                <span className="status-pill">{fileName}</span>
+              ) : null}
+              {inputMode === "image" && imageStatus ? (
+                <span className="status-pill">{imageStatus}</span>
+              ) : null}
             </div>
           </>
         )}
@@ -869,182 +1353,273 @@ export default function HomePage() {
         </div>
       )}
 
-      {result && (
-        <div className="panel collapsible" style={{ marginBottom: 16 }}>
-          <div className="panel-head">
-            <div>
-              <strong>Colors</strong>
-              {colorsCollapsed && (
-                <span className="small" style={{ marginLeft: 8 }}>
-                  {result.legend.length} colors
-                </span>
-              )}
-            </div>
-            <button type="button" className="secondary slim" onClick={() => setColorsCollapsed((v) => !v)}>
-              {colorsCollapsed ? 'Show' : 'Hide'}
-            </button>
-          </div>
-
-          {!colorsCollapsed && (
-            <fieldset>
-              <legend>Colors</legend>
-              {result.legend.length === 0 ? (
-                <div className="small">No colors detected yet.</div>
-              ) : (
-                <div className="legend-list">
-                  {result.legend.map((entry) => {
-                    const activeColor = displayColors[entry.name] ?? entry.color;
-                    return (
-                      <div className="legend-item" key={entry.name}>
-                        <span className="swatch" style={{ backgroundColor: activeColor }} />
-                        <div style={{ flex: 1 }}>
-                          <div style={{ textTransform: 'capitalize' }}>{entry.name.replace(/_/g, ' ')}</div>
-                          <div className="small">{activeColor.toUpperCase()}</div>
-                        </div>
-                        <input
-                          type="color"
-                          value={activeColor}
-                          aria-label={`Override ${entry.name}`}
-                          onChange={(e) =>
-                            setCustomColors((prev) => ({
-                              ...prev,
-                              [entry.name]: e.target.value
-                            }))
-                          }
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </fieldset>
-          )}
-        </div>
-      )}
-
-      {canRender && result ? (
-        <div className="panel">
-          <div className="canvas-layout">
-            {crochetMode && (
-              <div className="crochet-column">
-                <div className="crochet-panel">
-                  <div className="crochet-top">
-                    <div>
-                      <span className="crochet-chip">Crochet mode</span>
-                      <div className="crochet-row-label">
-                        Row {activeRowIndex + 1} / {rowCount}
-                      </div>
-                      <div className="small">
-                        Side: {currentDirectionIsRtl ? 'R (droite→gauche)' : 'W (gauche→droite)'} · Click “Next row” as you go
-                      </div>
-                </div>
-                <div className="button-row">
-                  <button type="button" className="secondary" onClick={handlePrevRow} disabled={activeRowIndex === 0}>
-                    Previous row
-                  </button>
-                  <select
-                    className="row-select"
-                    value={activeRowIndex}
-                    onChange={(e) => jumpToRow(Number(e.target.value))}
-                  >
-                    {displayRows.map((row) => (
-                      <option key={`row-option-${row.id}`} value={row.index}>
-                        Row {row.index + 1} · {sideLabelForRow(row.index)}{' '}
-                        {row.index < activeRowIndex ? '✓' : ''}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={handleNextRow}
-                    disabled={activeRowIndex >= rowCount - 1}
-                  >
-                    Next row
-                  </button>
-                  <button type="button" className="secondary danger" onClick={handleDeleteRow} disabled={!rowCount}>
-                    Delete row
-                  </button>
-                </div>
-              </div>
-
-                  {activeRow ? (
-                    <div className="instruction-board">
-                      <div className="instruction-meta">
-                        <span>Follow row {activeRowIndex + 1}:</span>
-                        <span className="side-pill">
-                          {sideLabelForRow(activeRowIndex)} side
-                        </span>
-                      </div>
-                      <div className="segment-grid">
-                        {activeRowSegments.map((segment, idx) => {
-                          const fill = displayColors[segment.color] ?? stringToColor(segment.color);
-                          return (
-                            <div
-                              key={`${segment.color}-${idx}`}
-                              className="segment-card"
-                              style={
-                                {
-                                  '--segment-color': fill
-                                } as React.CSSProperties
-                          }
-                        >
-                          <div className="segment-line">
-                            <span className="swatch" style={{ backgroundColor: fill }} />
-                            <span className="segment-count">{segment.count} stitches</span>
-                            <span className="segment-dot">·</span>
-                            <span className="segment-color-text">{segment.color.replace(/_/g, ' ')}</span>
+      {result ? (
+        <div className="workspace-grid">
+          <div className="panel side-panel">
+            <div className="stack">
+              {crochetMode && (
+                <>
+                  {creationMode ? (
+                    <div className="crochet-panel">
+                      <div className="crochet-top">
+                        <div>
+                          <span className="crochet-chip">Palette mode</span>
+                          <div className="crochet-row-label">
+                            Creation/editing active
+                          </div>
+                          <div className="small">
+                            Click a color to set the brush, then click cells to
+                            paint.
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
+                      </div>
+                      <div className="palette-board">
+                        <div className="palette-section">
+                          <div className="palette-title">Brush</div>
+                          <div className="palette-current">
+                            <span
+                              className="swatch large"
+                              style={{ backgroundColor: brushColorHex }}
+                            />
+                            <div>
+                              <div className="palette-name">
+                                {normalizeColorName(brushColorName)}
+                              </div>
+                              <div className="small">
+                                {brushColorHex.toUpperCase()}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="palette-section">
+                          <div className="palette-title">Colors</div>
+                          <div className="palette-grid">
+                            {Object.entries(creationPalette).map(
+                              ([name, hex]) => (
+                                <button
+                                  key={name}
+                                  type="button"
+                                  className={`palette-chip ${normalizeColorName(name) === normalizeColorName(brushColorName) ? "active" : ""}`}
+                                  onClick={() => {
+                                    const normalized = normalizeColorName(name);
+                                    setBrushColorName(normalized);
+                                    setBrushColorHex(hex);
+                                  }}
+                                >
+                                  <span
+                                    className="swatch"
+                                    style={{ backgroundColor: hex }}
+                                  />
+                                  <span>{name.replace(/_/g, " ")}</span>
+                                </button>
+                              ),
+                            )}
+                          </div>
+                        </div>
+                        <div className="palette-section">
+                          <div className="palette-title">Add color</div>
+                          <div className="inline-fields">
+                            <div className="input-block">
+                              <label htmlFor="new-color-name">Name</label>
+                              <input
+                                id="new-color-name"
+                                type="text"
+                                value={newColorName}
+                                onChange={(e) =>
+                                  setNewColorName(e.target.value)
+                                }
+                                placeholder="nouveau"
+                              />
+                            </div>
+                            <div className="input-block">
+                              <label htmlFor="new-color-hex">Hex</label>
+                              <input
+                                id="new-color-hex"
+                                type="color"
+                                value={newColorHex}
+                                onChange={(e) => setNewColorHex(e.target.value)}
+                              />
+                            </div>
+                          </div>
+                          <div className="button-row" style={{ marginTop: 6 }}>
+                            <button
+                              type="button"
+                              onClick={handleAddPaletteColor}
+                            >
+                              Add to palette & set brush
+                            </button>
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                  ) : null}
-                </div>
-              </div>
-            )}
+                  ) : (
+                    <div className="crochet-panel">
+                      <div className="crochet-top">
+                        <div>
+                          <span className="crochet-chip">Crochet mode</span>
+                          <div className="crochet-row-label">
+                            Row {activeRowIndex + 1} / {rowCount}
+                          </div>
+                          <div className="small">
+                            Side:{" "}
+                            {currentDirectionIsRtl
+                              ? "R (droite→gauche)"
+                              : "W (gauche→droite)"}{" "}
+                            · Click “Next row” as you go
+                          </div>
+                        </div>
+                        <div className="button-row">
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={handlePrevRow}
+                            disabled={activeRowIndex === 0}
+                          >
+                            Previous row
+                          </button>
+                          <select
+                            className="row-select"
+                            value={activeRowIndex}
+                            onChange={(e) => jumpToRow(Number(e.target.value))}
+                          >
+                            {displayRows.map((row) => (
+                              <option
+                                key={`row-option-${row.id}`}
+                                value={row.index}
+                              >
+                                Row {row.index + 1} ·{" "}
+                                {sideLabelForRow(row.index)}{" "}
+                                {row.index < activeRowIndex ? "✓" : ""}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={handleNextRow}
+                            disabled={activeRowIndex >= rowCount - 1}
+                          >
+                            Next row
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary danger"
+                            onClick={handleDeleteRow}
+                            disabled={!rowCount}
+                          >
+                            Delete row
+                          </button>
+                        </div>
+                      </div>
 
-            <div className="grid-column">
-              <div className="toolbar">
-                <strong>Rendered grid</strong>
-                <span className="small">
-                  {rowCount} rows × {colCount ?? '—'} columns · {gridCells.length} cells
-                </span>
-              </div>
+                      {activeRow ? (
+                        <div className="instruction-board">
+                          <div className="instruction-meta">
+                            <span>Follow row {activeRowIndex + 1}:</span>
+                            <span className="side-pill">
+                              {sideLabelForRow(activeRowIndex)} side
+                            </span>
+                          </div>
+                          <div className="segment-grid">
+                            {activeRowSegments.map((segment, idx) => {
+                              const fill =
+                                displayColors[segment.color] ??
+                                stringToColor(segment.color);
+                              const segKey = `${activeRowIndex}-${idx}`;
+                              const isDone = instructionDone[segKey];
+                              return (
+                                <div
+                                  key={`${segment.color}-${idx}`}
+                                  className={`segment-card ${isDone ? "done" : ""}`}
+                                  style={
+                                    {
+                                      "--segment-color": fill,
+                                    } as React.CSSProperties
+                                  }
+                                  onClick={() =>
+                                    toggleSegmentDone(activeRowIndex, idx)
+                                  }
+                                  role="button"
+                                  tabIndex={0}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      toggleSegmentDone(activeRowIndex, idx);
+                                    }
+                                  }}
+                                >
+                                  <div className="segment-line">
+                                    <span
+                                      className="swatch"
+                                      style={{ backgroundColor: fill }}
+                                    />
+                                    <span className="segment-count">
+                                      {segment.count} stitches
+                                    </span>
+                                    <span className="segment-dot">·</span>
+                                    <span className="segment-color-text">
+                                      {segment.color.replace(/_/g, " ")}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="panel grid-panel">
+            <div className="toolbar">
+              <strong>Rendered grid</strong>
+              <span className="small">
+                {rowCount} rows × {colCount ?? "—"} columns · {gridCells.length}{" "}
+                cells
+              </span>
+            </div>
+            {canRender && rowCount > 0 ? (
               <div className="grid-wrapper">
                 <div
                   style={{
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    ...( { '--cell-size': `${cellSize}px` } as React.CSSProperties )
+                    display: "flex",
+                    alignItems: "flex-start",
+                    ...({
+                      "--cell-size": `${cellSize}px`,
+                    } as React.CSSProperties),
                   }}
                 >
                   {showRowNumbers && (
                     <div
                       style={{
-                        position: 'sticky',
+                        position: "sticky",
                         left: 0,
                         marginRight: 8,
-                        display: 'grid',
-                        gridTemplateRows: `repeat(${rowCount}, var(--cell-size))`
+                        display: "grid",
+                        gridTemplateRows: `repeat(${rowCount}, var(--cell-size))`,
                       }}
                     >
                       {displayRows.map((row) => (
                         <div
                           key={`row-num-${row.id}`}
                           className={`row-number ${
-                            crochetMode && row.index === activeRowIndex ? 'active' : ''
-                          } ${crochetMode && row.index < activeRowIndex ? 'done' : ''}`}
+                            crochetMode && row.index === activeRowIndex
+                              ? "active"
+                              : ""
+                          } ${crochetMode && row.index < activeRowIndex ? "done" : ""}`}
                           style={{
                             height: cellSize,
                             lineHeight: `${cellSize}px`,
-                            gridRowStart: rowCount - row.index
+                            gridRowStart: rowCount - row.index,
                           }}
                           role="button"
                           tabIndex={0}
                           onClick={() => jumpToRow(row.index)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
+                            if (e.key === "Enter" || e.key === " ") {
                               e.preventDefault();
                               jumpToRow(row.index);
                             }
@@ -1059,53 +1634,115 @@ export default function HomePage() {
                     className="grid-shell"
                     style={{
                       width: gridDimensions.width,
-                      height: gridDimensions.height
+                      height: gridDimensions.height,
                     }}
                   >
+                    {canRender && rowCount > 0 ? (
+                      <div
+                        className="row-highlight"
+                        style={{
+                          top: rowCursorTop,
+                          height: cellSize,
+                        }}
+                      />
+                    ) : null}
                     <div
                       className="grid"
                       style={{
                         ...gridStyle,
                         width: gridDimensions.width,
-                        height: gridDimensions.height
+                        height: gridDimensions.height,
                       }}
                     >
-                    {gridCells.map((cell) => {
-                      const fill = displayColors[cell.color] ?? stringToColor(cell.color);
-                      return (
-                        <div
-                          key={cell.key}
-                          className={`cell ${showGridLines ? 'grid-lines' : ''} ${
-                            crochetMode && cell.originalRow === activeRowIndex ? 'active-row' : ''
-                          } ${crochetMode && cell.originalRow < activeRowIndex ? 'done-row' : ''}`}
-                          style={{
-                            backgroundColor: fill,
-                            gridColumnStart: cell.colPos,
-                            gridRowStart: cell.rowPos
-                          }}
-                          title={`Row ${cell.originalRow + 1}`}
-                        />
-                      );
-                    })}
-                  </div>
-                  {canRender && rowCount > 0 ? (
-                    <div className="row-cursor" style={{ top: rowCursorTop, height: cellSize }}>
-                      <div className="row-cursor-chip">
-                        <ArrowLeftToLine aria-hidden className="row-cursor-arrow" size={20} strokeWidth={2} />
-                        <span className="row-cursor-side">{sideLabelForRow(activeRowIndex)}</span>
-                        <span className="row-cursor-label">Row {activeRowIndex + 1} - CURRENT</span>
-                      </div>
+                      {gridCells.map((cell) => {
+                        const fill =
+                          displayColors[cell.color] ??
+                          stringToColor(cell.color);
+                        return (
+                          <div
+                            key={cell.key}
+                            className={`cell ${showGridLines ? "grid-lines" : ""} ${
+                              crochetMode && cell.originalRow < activeRowIndex
+                                ? "done-row"
+                                : ""
+                            } ${creationMode ? "editable" : ""} ${
+                              cell.originalRow === activeRowIndex
+                                ? "current-cell"
+                                : ""
+                            }`}
+                            style={{
+                              backgroundColor: fill,
+                              gridColumnStart: cell.colPos,
+                              gridRowStart: cell.rowPos,
+                            }}
+                            title={`Row ${cell.originalRow + 1}`}
+                            onClick={
+                              creationMode
+                                ? () =>
+                                    handlePaintCell(
+                                      cell.originalRow,
+                                      cell.colIndex,
+                                    )
+                                : undefined
+                            }
+                            role={creationMode ? "button" : undefined}
+                            tabIndex={creationMode ? 0 : -1}
+                            onKeyDown={
+                              creationMode
+                                ? (e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      handlePaintCell(
+                                        cell.originalRow,
+                                        cell.colIndex,
+                                      );
+                                    }
+                                  }
+                                : undefined
+                            }
+                          />
+                        );
+                      })}
                     </div>
-                  ) : null}
+                    {canRender && rowCount > 0 ? (
+                      <div
+                        className="row-cursor"
+                        style={{ top: rowCursorTop, height: cellSize }}
+                      >
+                        <div className="row-cursor-chip">
+                          <ArrowLeftToLine
+                            aria-hidden
+                            className="row-cursor-arrow"
+                            size={20}
+                            strokeWidth={2}
+                          />
+                          <span className="row-cursor-side">
+                            {sideLabelForRow(activeRowIndex)}
+                          </span>
+                          <span className="row-cursor-label">
+                            Row {activeRowIndex + 1} - CURRENT
+                          </span>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               </div>
+            ) : (
+              <div className="panel soft-panel">
+                <div className="small">
+                  Load a file, convert an image, or create a canvas to see the
+                  grid.
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       ) : (
         <div className="panel">
-          <div className="small">Load a file or click “Load example” to render the grid.</div>
+          <div className="small">
+            Load a file or click “Load example” to render the grid.
+          </div>
         </div>
       )}
 
@@ -1113,20 +1750,37 @@ export default function HomePage() {
         <div className="footer-head">
           <div>
             <strong>Always-working prompt to get a TXT from an image</strong>
-            {footerCollapsed ? <span className="small" style={{ marginLeft: 8 }}>Hidden</span> : null}
+            {footerCollapsed ? (
+              <span className="small" style={{ marginLeft: 8 }}>
+                Hidden
+              </span>
+            ) : null}
           </div>
           <div className="button-row">
-            <button type="button" className="secondary slim" onClick={handleCopyPrompt}>
+            <button
+              type="button"
+              className="secondary slim"
+              onClick={handleCopyPrompt}
+            >
               Copy prompt
             </button>
-            <button type="button" className="secondary slim" onClick={() => setFooterCollapsed((v) => !v)}>
-              {footerCollapsed ? 'Show' : 'Hide'}
+            <button
+              type="button"
+              className="secondary slim"
+              onClick={() => setFooterCollapsed((v) => !v)}
+            >
+              {footerCollapsed ? "Show" : "Hide"}
             </button>
             {copyStatus ? <span className="small">{copyStatus}</span> : null}
           </div>
         </div>
         {!footerCollapsed && (
-          <textarea className="prompt-box" readOnly value={CONVERSION_PROMPT} aria-label="Conversion prompt" />
+          <textarea
+            className="prompt-box"
+            readOnly
+            value={CONVERSION_PROMPT}
+            aria-label="Conversion prompt"
+          />
         )}
       </footer>
     </main>
